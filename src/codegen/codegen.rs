@@ -291,6 +291,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let result = self.builder.build_float_mul(l, r, "fmultmp").unwrap();
                             Ok(result.into())
                         }
+                        (BasicValueEnum::PointerValue(l), BasicValueEnum::IntValue(r)) => {
+                            // String multiplication: string * int
+                            self.multiply_string(l, r)
+                        }
                         _ => Err("Unsupported operation".to_string()),
                     },
                     BinaryOperator::Divide => match (left, right) {
@@ -1306,6 +1310,249 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         None
+    }
+
+    fn multiply_string(
+        &mut self,
+        string_ptr: inkwell::values::PointerValue<'ctx>,
+        count: inkwell::values::IntValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        // Get or declare strlen function to get string length
+        let strlen_fn = if let Some(func) = self.module.get_function("strlen") {
+            func
+        } else {
+            let i32_type = self.context.i32_type();
+            let str_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let strlen_fn_type = i32_type.fn_type(&[str_type.into()], false);
+            self.module.add_function("strlen", strlen_fn_type, None)
+        };
+
+        // Get or declare malloc function for memory allocation
+        let malloc_fn = if let Some(func) = self.module.get_function("malloc") {
+            func
+        } else {
+            let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let malloc_fn_type = i8_ptr_type.fn_type(&[self.context.i64_type().into()], false);
+            self.module.add_function("malloc", malloc_fn_type, None)
+        };
+
+        // Get or declare strcpy function for string copying
+        let strcpy_fn = if let Some(func) = self.module.get_function("strcpy") {
+            func
+        } else {
+            let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let strcpy_fn_type =
+                i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false);
+            self.module.add_function("strcpy", strcpy_fn_type, None)
+        };
+
+        // Get or declare strcat function for string concatenation
+        let strcat_fn = if let Some(func) = self.module.get_function("strcat") {
+            func
+        } else {
+            let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let strcat_fn_type =
+                i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false);
+            self.module.add_function("strcat", strcat_fn_type, None)
+        };
+
+        // Get the current function for basic block operations
+        let current_function = self
+            .builder
+            .get_insert_block()
+            .unwrap()
+            .get_parent()
+            .unwrap();
+
+        // Check if count is negative or zero
+        let zero = self.context.i64_type().const_int(0, false);
+        let is_negative = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::SLT, count, zero, "is_negative")
+            .unwrap();
+        let is_zero = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, count, zero, "is_zero")
+            .unwrap();
+        let is_non_positive = self
+            .builder
+            .build_or(is_negative, is_zero, "is_non_positive")
+            .unwrap();
+
+        // Create basic blocks for conditional branching
+        let empty_block = self
+            .context
+            .append_basic_block(current_function, "empty_result");
+        let multiply_block = self
+            .context
+            .append_basic_block(current_function, "multiply_string");
+        let merge_block = self
+            .context
+            .append_basic_block(current_function, "merge_multiply");
+
+        // Branch based on count value
+        self.builder
+            .build_conditional_branch(is_non_positive, empty_block, multiply_block)
+            .unwrap();
+
+        // Block for empty result (count <= 0)
+        self.builder.position_at_end(empty_block);
+        let empty_name = format!("empty_{}", self.string_counter);
+        self.string_counter += 1;
+        let empty_str = self
+            .builder
+            .build_global_string_ptr("", &empty_name)
+            .unwrap();
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .unwrap();
+
+        // Block for actual multiplication
+        self.builder.position_at_end(multiply_block);
+
+        // Calculate length of the original string
+        let str_len = self
+            .builder
+            .build_call(strlen_fn, &[string_ptr.into()], "str_len")
+            .unwrap()
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+
+        // Convert count to i32 for calculations
+        let count_i32 = self
+            .builder
+            .build_int_cast(count, self.context.i32_type(), "count_i32")
+            .unwrap();
+
+        // Calculate total length: str_len * count + 1 for null terminator
+        let total_len = self
+            .builder
+            .build_int_mul(str_len, count_i32, "total_len")
+            .unwrap();
+        let total_len_with_null = self
+            .builder
+            .build_int_add(
+                total_len,
+                self.context.i32_type().const_int(1, false),
+                "total_len_with_null",
+            )
+            .unwrap();
+
+        // Convert to i64 for malloc
+        let malloc_size = self
+            .builder
+            .build_int_cast(total_len_with_null, self.context.i64_type(), "malloc_size")
+            .unwrap();
+
+        // Allocate memory for the result string
+        let result_ptr = self
+            .builder
+            .build_call(malloc_fn, &[malloc_size.into()], "result_ptr")
+            .unwrap()
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_pointer_value();
+
+        // Initialize result as empty string
+        let empty_for_init = self
+            .builder
+            .build_global_string_ptr("", "empty_init")
+            .unwrap();
+        let _ = self
+            .builder
+            .build_call(
+                strcpy_fn,
+                &[result_ptr.into(), empty_for_init.as_pointer_value().into()],
+                "init_empty",
+            )
+            .unwrap();
+
+        // Create loop to concatenate string count times
+        let loop_block = self.context.append_basic_block(current_function, "loop");
+        let loop_body = self
+            .context
+            .append_basic_block(current_function, "loop_body");
+        let loop_end = self
+            .context
+            .append_basic_block(current_function, "loop_end");
+
+        // Initialize loop counter
+        let loop_counter = self
+            .builder
+            .build_alloca(self.context.i64_type(), "loop_counter")
+            .unwrap();
+        self.builder.build_store(loop_counter, zero).unwrap();
+
+        // Jump to loop condition
+        self.builder.build_unconditional_branch(loop_block).unwrap();
+
+        // Loop condition block
+        self.builder.position_at_end(loop_block);
+        let current_counter = self
+            .builder
+            .build_load(self.context.i64_type(), loop_counter, "current_counter")
+            .unwrap()
+            .into_int_value();
+        let loop_condition = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                current_counter,
+                count,
+                "loop_condition",
+            )
+            .unwrap();
+        self.builder
+            .build_conditional_branch(loop_condition, loop_body, loop_end)
+            .unwrap();
+
+        // Loop body block
+        self.builder.position_at_end(loop_body);
+        // Concatenate the string to result
+        let _ = self
+            .builder
+            .build_call(
+                strcat_fn,
+                &[result_ptr.into(), string_ptr.into()],
+                "strcat_iter",
+            )
+            .unwrap();
+
+        // Increment counter
+        let next_counter = self
+            .builder
+            .build_int_add(
+                current_counter,
+                self.context.i64_type().const_int(1, false),
+                "next_counter",
+            )
+            .unwrap();
+        self.builder
+            .build_store(loop_counter, next_counter)
+            .unwrap();
+
+        // Jump back to loop condition
+        self.builder.build_unconditional_branch(loop_block).unwrap();
+
+        // Loop end block
+        self.builder.position_at_end(loop_end);
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .unwrap();
+
+        // Merge block
+        self.builder.position_at_end(merge_block);
+
+        // Create phi node for the result
+        let result_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let phi = self
+            .builder
+            .build_phi(result_type, "multiply_result")
+            .unwrap();
+        phi.add_incoming(&[(&empty_str, empty_block), (&result_ptr, loop_end)]);
+
+        Ok(phi.as_basic_value())
     }
 
     fn concatenate_strings(
