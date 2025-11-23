@@ -265,6 +265,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                             let result = self.builder.build_float_add(l, r, "faddtmp").unwrap();
                             Ok(result.into())
                         }
+                        (BasicValueEnum::PointerValue(l), BasicValueEnum::PointerValue(r)) => {
+                            // String concatenation
+                            self.concatenate_strings(l, r)
+                        }
                         _ => Err("Unsupported operation".to_string()),
                     },
                     BinaryOperator::Subtract => match (left, right) {
@@ -994,9 +998,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Try to parse as a more complex expression
         // For now, we'll handle simple arithmetic expressions
         if let Some(parsed_expr) = self.parse_simple_expression(expr)
-            && let Ok(value) = self.compile_expression(&parsed_expr) {
-                return self.value_to_string(value);
-            }
+            && let Ok(value) = self.compile_expression(&parsed_expr)
+        {
+            return self.value_to_string(value);
+        }
 
         // If all else fails, return the expression as a string literal
         let name = format!("expr_{}", self.string_counter);
@@ -1301,5 +1306,114 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         None
+    }
+
+    fn concatenate_strings(
+        &mut self,
+        left: inkwell::values::PointerValue<'ctx>,
+        right: inkwell::values::PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        // Get or declare strlen function to get string lengths
+        let strlen_fn = if let Some(func) = self.module.get_function("strlen") {
+            func
+        } else {
+            let i32_type = self.context.i32_type();
+            let str_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let strlen_fn_type = i32_type.fn_type(&[str_type.into()], false);
+            self.module.add_function("strlen", strlen_fn_type, None)
+        };
+
+        // Get or declare malloc function for memory allocation
+        let malloc_fn = if let Some(func) = self.module.get_function("malloc") {
+            func
+        } else {
+            let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let malloc_fn_type = i8_ptr_type.fn_type(&[self.context.i64_type().into()], false);
+            self.module.add_function("malloc", malloc_fn_type, None)
+        };
+
+        // Get or declare strcpy function for string copying
+        let strcpy_fn = if let Some(func) = self.module.get_function("strcpy") {
+            func
+        } else {
+            let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let strcpy_fn_type =
+                i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false);
+            self.module.add_function("strcpy", strcpy_fn_type, None)
+        };
+
+        // Get or declare strcat function for string concatenation
+        let strcat_fn = if let Some(func) = self.module.get_function("strcat") {
+            func
+        } else {
+            let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let strcat_fn_type =
+                i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false);
+            self.module.add_function("strcat", strcat_fn_type, None)
+        };
+
+        // Calculate lengths of both strings
+        let left_len = self
+            .builder
+            .build_call(strlen_fn, &[left.into()], "left_len")
+            .unwrap()
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+
+        let right_len = self
+            .builder
+            .build_call(strlen_fn, &[right.into()], "right_len")
+            .unwrap()
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+
+        // Calculate total length (left + right + 1 for null terminator)
+        let total_len = self
+            .builder
+            .build_int_add(left_len, right_len, "total_len")
+            .unwrap();
+        let total_len_with_null = self
+            .builder
+            .build_int_add(
+                total_len,
+                self.context.i32_type().const_int(1, false),
+                "total_len_with_null",
+            )
+            .unwrap();
+
+        // Convert to i64 for malloc
+        let malloc_size = self
+            .builder
+            .build_int_cast(total_len_with_null, self.context.i64_type(), "malloc_size")
+            .unwrap();
+
+        // Allocate memory for the concatenated string
+        let result_ptr = self
+            .builder
+            .build_call(malloc_fn, &[malloc_size.into()], "result_ptr")
+            .unwrap()
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_pointer_value();
+
+        // Copy left string to result
+        let _ = self
+            .builder
+            .build_call(strcpy_fn, &[result_ptr.into(), left.into()], "strcpy_left")
+            .unwrap();
+
+        // Concatenate right string to result
+        let _ = self
+            .builder
+            .build_call(
+                strcat_fn,
+                &[result_ptr.into(), right.into()],
+                "strcat_right",
+            )
+            .unwrap();
+
+        Ok(result_ptr.into())
     }
 }
