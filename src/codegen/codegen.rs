@@ -58,13 +58,47 @@ impl<'ctx> CodeGenerator<'ctx> {
             Node::Assignment(assignment) => {
                 let value = self.compile_expression(&assignment.value)?;
 
+                // For division results, ensure we use float type even if operands are integers
+                let is_division = if let Node::Binary(binary) = &*assignment.value {
+                    matches!(binary.operator, BinaryOperator::Divide)
+                } else {
+                    false
+                };
+
                 // Allocate space for the variable on the stack
-                let ptr = self
-                    .builder
-                    .build_alloca(value.get_type(), &assignment.name)
-                    .unwrap();
-                self.builder.build_store(ptr, value).unwrap();
-                self.variables.insert(assignment.name.clone(), (ptr, value));
+                let ptr = if is_division {
+                    // For division, always allocate as float
+                    let float_type = self.context.f64_type();
+                    self.builder
+                        .build_alloca(float_type, &assignment.name)
+                        .unwrap()
+                } else {
+                    self.builder
+                        .build_alloca(value.get_type(), &assignment.name)
+                        .unwrap()
+                };
+
+                // Convert value to the allocation type if needed
+                let stored_value = if is_division {
+                    // For division, ensure the result is stored as float
+                    match value {
+                        BasicValueEnum::FloatValue(_) => value,
+                        BasicValueEnum::IntValue(int_val) => {
+                            let float_type = self.context.f64_type();
+                            self.builder
+                                .build_signed_int_to_float(int_val, float_type, "int_to_float")
+                                .unwrap()
+                                .into()
+                        }
+                        _ => value,
+                    }
+                } else {
+                    value
+                };
+
+                self.builder.build_store(ptr, stored_value).unwrap();
+                self.variables
+                    .insert(assignment.name.clone(), (ptr, stored_value));
                 Ok(())
             }
             Node::ExpressionStatement(expr_stmt) => {
@@ -95,14 +129,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Save current position
         let current_position = self.builder.get_insert_block();
 
-        // Create function type - for now we'll assume all functions return i64 and take i64 parameters
-        let int_type = self.context.i64_type();
+        // For now, we'll use i64 as the return type for all functions
+        // The f-string issue needs a different approach
+        let return_type = self.context.i64_type();
         let param_types: Vec<_> = function
             .parameters
             .iter()
-            .map(|_| int_type.into())
+            .map(|_| return_type.into())
             .collect();
-        let fn_type = int_type.fn_type(&param_types, false);
+        let fn_type = return_type.fn_type(&param_types, false);
 
         // Create function
         let function_value = self.module.add_function(&function.name, fn_type, None);
@@ -114,7 +149,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Create allocations for parameters
         for (i, param_name) in function.parameters.iter().enumerate() {
             let param = function_value.get_nth_param(i as u32).unwrap();
-            let ptr = self.builder.build_alloca(int_type, param_name).unwrap();
+            let ptr = self.builder.build_alloca(return_type, param_name).unwrap();
             self.builder.build_store(ptr, param).unwrap();
             self.variables.insert(param_name.clone(), (ptr, param));
         }
@@ -128,7 +163,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .is_some_and(|inst| inst.is_terminator())
         {
             self.builder
-                .build_return(Some(&int_type.const_int(0, false)))
+                .build_return(Some(&return_type.const_int(0, false)))
                 .unwrap();
         }
 
@@ -166,8 +201,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         Ok(evaluated_string)
                     }
                     LiteralValue::Boolean(value) => {
-                        let bool_type = self.context.bool_type();
-                        Ok(bool_type.const_int(*value as u64, false).into())
+                        // For boolean literals, we'll use i64 but with a special marker
+                        // We'll use -2 for True and -3 for False to distinguish from regular integers
+                        let int_type = self.context.i64_type();
+                        let bool_val = if *value { -2i64 } else { -3i64 };
+                        Ok(int_type.const_int(bool_val as u64, true).into())
                     }
                     LiteralValue::None => {
                         // Represent None as 0
@@ -256,7 +294,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                             if r.get_zero_extended_constant() == Some(0) {
                                 Err("Division by zero".to_string())
                             } else {
-                                Ok(BasicValueEnum::IntValue(l))
+                                // Convert integers to float for true division
+                                let float_type = self.context.f64_type();
+                                let l_float = self
+                                    .builder
+                                    .build_signed_int_to_float(l, float_type, "l_float")
+                                    .unwrap();
+                                let r_float = self
+                                    .builder
+                                    .build_signed_int_to_float(r, float_type, "r_float")
+                                    .unwrap();
+                                let result = self
+                                    .builder
+                                    .build_float_div(l_float, r_float, "fdivtmp")
+                                    .unwrap();
+                                Ok(result.into())
                             }
                         }
                         (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => {
@@ -354,9 +406,121 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // Handle different types of values
                         match value {
                             BasicValueEnum::IntValue(int_val) => {
-                                // Create format string for integer
+                                // Check if this is a boolean value (we use -2 for True, -3 for False)
                                 let name = format!("fmt_{}", self.string_counter);
                                 self.string_counter += 1;
+
+                                let true_val = int_val.get_type().const_int((-2i64) as u64, true);
+                                let false_val = int_val.get_type().const_int((-3i64) as u64, true);
+
+                                let is_true = self
+                                    .builder
+                                    .build_int_compare(
+                                        inkwell::IntPredicate::EQ,
+                                        int_val,
+                                        true_val,
+                                        "is_true",
+                                    )
+                                    .unwrap();
+                                let is_false = self
+                                    .builder
+                                    .build_int_compare(
+                                        inkwell::IntPredicate::EQ,
+                                        int_val,
+                                        false_val,
+                                        "is_false",
+                                    )
+                                    .unwrap();
+                                let is_boolean = self
+                                    .builder
+                                    .build_or(is_true, is_false, "is_boolean")
+                                    .unwrap();
+
+                                // Create basic blocks for conditional branching
+                                let function = self
+                                    .builder
+                                    .get_insert_block()
+                                    .unwrap()
+                                    .get_parent()
+                                    .unwrap();
+                                let boolean_block =
+                                    self.context.append_basic_block(function, "boolean_check");
+                                let numeric_block =
+                                    self.context.append_basic_block(function, "print_numeric");
+                                let true_print_block =
+                                    self.context.append_basic_block(function, "print_true");
+                                let false_print_block =
+                                    self.context.append_basic_block(function, "print_false");
+                                let merge_block =
+                                    self.context.append_basic_block(function, "merge");
+
+                                // Branch based on whether it's a boolean
+                                self.builder
+                                    .build_conditional_branch(
+                                        is_boolean,
+                                        boolean_block,
+                                        numeric_block,
+                                    )
+                                    .unwrap();
+
+                                // Block for boolean values - check if true or false
+                                self.builder.position_at_end(boolean_block);
+                                let is_true_val = self
+                                    .builder
+                                    .build_int_compare(
+                                        inkwell::IntPredicate::EQ,
+                                        int_val,
+                                        true_val,
+                                        "is_true_val",
+                                    )
+                                    .unwrap();
+                                self.builder
+                                    .build_conditional_branch(
+                                        is_true_val,
+                                        true_print_block,
+                                        false_print_block,
+                                    )
+                                    .unwrap();
+
+                                // Block for printing "True"
+                                self.builder.position_at_end(true_print_block);
+                                let true_format = self
+                                    .builder
+                                    .build_global_string_ptr("True\n", &format!("{}_true", name))
+                                    .unwrap();
+                                let _ = self
+                                    .builder
+                                    .build_call(
+                                        printf_fn,
+                                        &[true_format.as_pointer_value().into()],
+                                        "printf_true",
+                                    )
+                                    .unwrap();
+                                self.builder
+                                    .build_unconditional_branch(merge_block)
+                                    .unwrap();
+
+                                // Block for printing "False"
+                                self.builder.position_at_end(false_print_block);
+                                let false_format = self
+                                    .builder
+                                    .build_global_string_ptr("False\n", &format!("{}_false", name))
+                                    .unwrap();
+                                let _ = self
+                                    .builder
+                                    .build_call(
+                                        printf_fn,
+                                        &[false_format.as_pointer_value().into()],
+                                        "printf_false",
+                                    )
+                                    .unwrap();
+                                self.builder
+                                    .build_unconditional_branch(merge_block)
+                                    .unwrap();
+
+                                // Block for printing numeric values
+                                self.builder.position_at_end(numeric_block);
+                                // Print integers as integers, not as floats
                                 let format_str = self
                                     .builder
                                     .build_global_string_ptr("%ld\n", &name)
@@ -369,13 +533,71 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         "printf",
                                     )
                                     .unwrap();
+                                self.builder
+                                    .build_unconditional_branch(merge_block)
+                                    .unwrap();
+
+                                // Merge block
+                                self.builder.position_at_end(merge_block);
                             }
                             BasicValueEnum::FloatValue(float_val) => {
-                                // Create format string for float
+                                // Create format string for float with proper formatting
                                 let name = format!("fmt_{}", self.string_counter);
                                 self.string_counter += 1;
+
+                                // Check if it's zero and print as 0.0 instead of 0
+                                let zero_val = float_val.get_type().const_float(0.0);
+                                let is_zero = self
+                                    .builder
+                                    .build_float_compare(
+                                        inkwell::FloatPredicate::OEQ,
+                                        float_val,
+                                        zero_val,
+                                        "is_zero_float",
+                                    )
+                                    .unwrap();
+
+                                let function = self
+                                    .builder
+                                    .get_insert_block()
+                                    .unwrap()
+                                    .get_parent()
+                                    .unwrap();
+                                let zero_block = self
+                                    .context
+                                    .append_basic_block(function, "print_zero_float");
+                                let regular_block = self
+                                    .context
+                                    .append_basic_block(function, "print_regular_float");
+                                let merge_block =
+                                    self.context.append_basic_block(function, "merge_float");
+
+                                self.builder
+                                    .build_conditional_branch(is_zero, zero_block, regular_block)
+                                    .unwrap();
+
+                                // Block for printing 0.0
+                                self.builder.position_at_end(zero_block);
+                                let zero_format = self
+                                    .builder
+                                    .build_global_string_ptr("0.0\n", &format!("{}_zero", name))
+                                    .unwrap();
+                                let _ = self
+                                    .builder
+                                    .build_call(
+                                        printf_fn,
+                                        &[zero_format.as_pointer_value().into()],
+                                        "printf_zero",
+                                    )
+                                    .unwrap();
+                                self.builder
+                                    .build_unconditional_branch(merge_block)
+                                    .unwrap();
+
+                                // Block for printing regular float
+                                self.builder.position_at_end(regular_block);
                                 let format_str =
-                                    self.builder.build_global_string_ptr("%f\n", &name).unwrap();
+                                    self.builder.build_global_string_ptr("%g\n", &name).unwrap();
                                 let _ = self
                                     .builder
                                     .build_call(
@@ -384,6 +606,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         "printf",
                                     )
                                     .unwrap();
+                                self.builder
+                                    .build_unconditional_branch(merge_block)
+                                    .unwrap();
+
+                                // Merge block
+                                self.builder.position_at_end(merge_block);
                             }
                             BasicValueEnum::PointerValue(ptr_val) => {
                                 // For string literals in print, we need to handle them specially
@@ -535,7 +763,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             sprintf_args.push(int_val.into());
                         }
                         BasicValueEnum::FloatValue(float_val) => {
-                            format_string.push_str("%f");
+                            format_string.push_str("%.6g");
                             sprintf_args.push(float_val.into());
                         }
                         BasicValueEnum::PointerValue(ptr_val) => {
@@ -745,22 +973,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         let expr = expr.trim();
 
         // First, try to handle simple variable names
-        if let Some((ptr, value)) = self.variables.get(expr) {
+        if let Some((ptr, stored_value)) = self.variables.get(expr) {
             // Load the current value from the variable's memory location
             let loaded_value = self
                 .builder
-                .build_load(value.get_type(), *ptr, &format!("load_{}", expr))
+                .build_load(stored_value.get_type(), *ptr, &format!("load_{}", expr))
                 .unwrap();
-            return self.value_to_string(loaded_value);
+
+            // For string variables, we need to handle them specially
+            // Check if the stored value was a string pointer
+            if matches!(stored_value, BasicValueEnum::PointerValue(_)) {
+                // This is a string variable, return the loaded value directly
+                return Ok(loaded_value);
+            } else {
+                // For other types, convert to string
+                return self.value_to_string(loaded_value);
+            }
         }
 
         // Try to parse as a more complex expression
         // For now, we'll handle simple arithmetic expressions
         if let Some(parsed_expr) = self.parse_simple_expression(expr)
-            && let Ok(value) = self.compile_expression(&parsed_expr)
-        {
-            return self.value_to_string(value);
-        }
+            && let Ok(value) = self.compile_expression(&parsed_expr) {
+                return self.value_to_string(value);
+            }
 
         // If all else fails, return the expression as a string literal
         let name = format!("expr_{}", self.string_counter);
@@ -917,7 +1153,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.string_counter += 1;
                 let format_ptr = self
                     .builder
-                    .build_global_string_ptr("%.6f", &format_name)
+                    .build_global_string_ptr("%.6g", &format_name)
                     .unwrap();
 
                 // Call snprintf to convert float to string
@@ -973,6 +1209,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Try to parse as simple binary expression (e.g., "a + b")
+        // Only handle very simple cases to avoid recursion
         if let Some((left_str, op_str, right_str)) = self.parse_binary_expression(expr)
             && let Some(left_node) = self.parse_simple_expression(left_str.trim())
             && let Some(right_node) = self.parse_simple_expression(right_str.trim())
@@ -1005,6 +1242,46 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         None
+    }
+
+    #[allow(dead_code)]
+    fn parse_complex_expression(&self, expr: &str) -> Option<Node> {
+        // For now, just try simple parsing to avoid recursion issues
+        // If it's too complex, return None and let the caller handle it as a string
+        let expr = expr.trim();
+
+        // Only handle very simple cases
+        if expr.contains('(') || expr.contains('*') || expr.contains('/') {
+            return None; // Too complex for now
+        }
+
+        // Try to parse as simple binary expression
+        if let Some((left_str, op_str, right_str)) = self.parse_binary_expression(expr)
+            && let Some(left_node) = self.parse_simple_expression(left_str.trim())
+            && let Some(right_node) = self.parse_simple_expression(right_str.trim())
+        {
+            let operator = match op_str.trim() {
+                "+" => Some(BinaryOperator::Add),
+                "-" => Some(BinaryOperator::Subtract),
+                "*" => Some(BinaryOperator::Multiply),
+                "/" => Some(BinaryOperator::Divide),
+                "//" => Some(BinaryOperator::FloorDivide),
+                "%" => Some(BinaryOperator::Modulo),
+                "**" => Some(BinaryOperator::Power),
+                _ => None,
+            };
+
+            if let Some(op) = operator {
+                return Some(Node::Binary(Binary {
+                    left: Box::new(left_node),
+                    operator: op,
+                    right: Box::new(right_node),
+                }));
+            }
+        }
+
+        // If not a binary expression, try to parse as simple expression
+        self.parse_simple_expression(expr)
     }
 
     fn parse_binary_expression(&self, expr: &str) -> Option<(String, String, String)> {
