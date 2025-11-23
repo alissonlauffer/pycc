@@ -164,10 +164,10 @@ impl Lexer {
                     self.read_char(); // consume 'f'
                     if self.ch == '"' {
                         self.read_char(); // skip opening quote
-                        Token::FString(self.read_string())
+                        Token::FString(self.read_fstring())
                     } else if self.ch == '\'' {
                         self.read_char(); // skip opening quote
-                        Token::FString(self.read_string_single())
+                        Token::FString(self.read_fstring_single())
                     } else {
                         // This shouldn't happen, but fallback to identifier
                         let ident = self.read_identifier();
@@ -303,6 +303,110 @@ impl Lexer {
         }
         let comment_text: String = self.input[start + 1..self.position].iter().collect();
         Token::Comment(comment_text)
+    }
+
+    fn read_fstring(&mut self) -> String {
+        let mut result = String::new();
+        let mut brace_depth = 0;
+        let mut in_expression = false;
+
+        while self.ch != '"' && self.ch != '\0' {
+            if self.ch == '\\' {
+                // Handle escape sequences
+                self.read_char(); // consume the backslash
+                match self.ch {
+                    'n' => result.push('\n'),
+                    't' => result.push('\t'),
+                    'r' => result.push('\r'),
+                    '"' => result.push('"'),
+                    '\'' => result.push('\''),
+                    '\\' => result.push('\\'),
+                    '{' => result.push('{'), // Escaped brace
+                    '}' => result.push('}'), // Escaped brace
+                    _ => {
+                        // If it's not a recognized escape sequence,
+                        // just add the backslash and the character as-is
+                        result.push('\\');
+                        result.push(self.ch);
+                    }
+                }
+            } else if self.ch == '{' {
+                if in_expression {
+                    brace_depth += 1;
+                }
+                in_expression = true;
+                result.push(self.ch);
+            } else if self.ch == '}' {
+                if in_expression {
+                    if brace_depth > 0 {
+                        brace_depth -= 1;
+                    } else {
+                        in_expression = false;
+                    }
+                }
+                result.push(self.ch);
+            } else {
+                result.push(self.ch);
+            }
+            self.read_char();
+        }
+
+        if self.ch == '"' {
+            self.read_char(); // consume closing quote
+        }
+        result
+    }
+
+    fn read_fstring_single(&mut self) -> String {
+        let mut result = String::new();
+        let mut brace_depth = 0;
+        let mut in_expression = false;
+
+        while self.ch != '\'' && self.ch != '\0' {
+            if self.ch == '\\' {
+                // Handle escape sequences
+                self.read_char(); // consume the backslash
+                match self.ch {
+                    'n' => result.push('\n'),
+                    't' => result.push('\t'),
+                    'r' => result.push('\r'),
+                    '"' => result.push('"'),
+                    '\'' => result.push('\''),
+                    '\\' => result.push('\\'),
+                    '{' => result.push('{'), // Escaped brace
+                    '}' => result.push('}'), // Escaped brace
+                    _ => {
+                        // If it's not a recognized escape sequence,
+                        // just add the backslash and the character as-is
+                        result.push('\\');
+                        result.push(self.ch);
+                    }
+                }
+            } else if self.ch == '{' {
+                if in_expression {
+                    brace_depth += 1;
+                }
+                in_expression = true;
+                result.push(self.ch);
+            } else if self.ch == '}' {
+                if in_expression {
+                    if brace_depth > 0 {
+                        brace_depth -= 1;
+                    } else {
+                        in_expression = false;
+                    }
+                }
+                result.push(self.ch);
+            } else {
+                result.push(self.ch);
+            }
+            self.read_char();
+        }
+
+        if self.ch == '\'' {
+            self.read_char(); // consume closing quote
+        }
+        result
     }
 }
 

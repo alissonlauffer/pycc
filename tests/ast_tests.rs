@@ -1,4 +1,5 @@
 use pycc::ast::*;
+use std::f64::consts::PI;
 
 #[test]
 fn test_program_creation() {
@@ -15,7 +16,7 @@ fn test_literal_nodes() {
 
     // Test float literal
     let float_literal = Node::Literal(Literal {
-        value: LiteralValue::Float(3.14),
+        value: LiteralValue::Float(PI),
     });
 
     // Test string literal
@@ -44,7 +45,7 @@ fn test_literal_nodes() {
 
     match float_literal {
         Node::Literal(lit) => match lit.value {
-            LiteralValue::Float(val) => assert_eq!(val, 3.14),
+            LiteralValue::Float(val) => assert_eq!(val, PI),
             _ => panic!("Expected float literal"),
         },
         _ => panic!("Expected literal node"),

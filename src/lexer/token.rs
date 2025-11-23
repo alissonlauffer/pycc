@@ -44,18 +44,17 @@ pub enum Token {
     Not,          // not
 
     // Delimiters
-    LeftParen,    // (
-    RightParen,   // )
-    LeftBrace,    // {
-    RightBrace,   // }
+    LeftParen,  // (
+    RightParen, // )
+    LeftBrace,  // {
+    RightBrace, // }
     // LeftBracket,  // [ - Not currently used
     // RightBracket, // ] - Not currently used
-    Comma,        // ,
-    Colon,        // :
-    Semicolon,    // ;
+    Comma,     // ,
+    Colon,     // :
+    Semicolon, // ;
 
     // Special
     Eof,
     Illegal(String),
 }
-

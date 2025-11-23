@@ -78,12 +78,12 @@ fn test_identifiers_and_keywords() {
 
 #[test]
 fn test_numbers() {
-    let input = "42 3.14 0.5 100";
+    let input = "42 1.23456789012345 0.5 100";
     let mut lexer = Lexer::new(input);
 
     let expected_tokens = vec![
         Token::Integer(42),
-        Token::Float(3.14),
+        Token::Float(1.23456789012345),
         Token::Float(0.5),
         Token::Integer(100),
         Token::Eof,

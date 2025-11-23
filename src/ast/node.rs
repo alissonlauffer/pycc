@@ -113,9 +113,20 @@ pub enum LiteralValue {
     Integer(i64),
     Float(f64),
     String(String),
-    FString(String), // F-string literal
+    FString(FString), // F-string with parsed expressions
     Boolean(bool),
     None,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FString {
+    pub parts: Vec<FStringPart>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FStringPart {
+    Literal(String),
+    Expression(String), // For now, store as string - will be parsed later
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,5 +158,76 @@ impl Program {
         Program {
             statements: Vec::new(),
         }
+    }
+}
+
+impl FString {
+    pub fn parse(content: &str) -> Self {
+        let mut parts = Vec::new();
+        let mut current_literal = String::new();
+        let mut current_expression = String::new();
+        let mut in_expression = false;
+        let mut brace_depth = 0;
+        let mut chars = content.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                // Handle escape sequences - add to current part
+                if in_expression {
+                    current_expression.push(ch);
+                } else {
+                    current_literal.push(ch);
+                }
+                // Add the escaped character
+                if let Some(&_next_ch) = chars.peek() {
+                    let escaped = chars.next().unwrap();
+                    if in_expression {
+                        current_expression.push(escaped);
+                    } else {
+                        current_literal.push(escaped);
+                    }
+                }
+            } else if ch == '{' {
+                if in_expression {
+                    brace_depth += 1;
+                    current_expression.push(ch);
+                } else {
+                    // Start of expression
+                    if !current_literal.is_empty() {
+                        parts.push(FStringPart::Literal(current_literal.clone()));
+                        current_literal.clear();
+                    }
+                    in_expression = true;
+                    current_expression.clear();
+                }
+            } else if ch == '}' {
+                if in_expression {
+                    if brace_depth > 0 {
+                        brace_depth -= 1;
+                        current_expression.push(ch);
+                    } else {
+                        // End of expression
+                        if !current_expression.is_empty() {
+                            parts.push(FStringPart::Expression(current_expression.clone()));
+                            current_expression.clear();
+                        }
+                        in_expression = false;
+                    }
+                } else {
+                    current_literal.push(ch);
+                }
+            } else if in_expression {
+                current_expression.push(ch);
+            } else {
+                current_literal.push(ch);
+            }
+        }
+
+        // Add any remaining literal part
+        if !current_literal.is_empty() {
+            parts.push(FStringPart::Literal(current_literal));
+        }
+
+        FString { parts }
     }
 }

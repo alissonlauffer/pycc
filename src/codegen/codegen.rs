@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOperator, LiteralValue, Node};
+use crate::ast::{Binary, BinaryOperator, Identifier, Literal, LiteralValue, Node};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -160,9 +160,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // Return the pointer to the string
                         Ok(str_ptr.as_pointer_value().into())
                     }
-                    LiteralValue::FString(value) => {
+                    LiteralValue::FString(fstring) => {
                         // Handle f-string by parsing and evaluating expressions
-                        let evaluated_string = self.evaluate_fstring_codegen(value)?;
+                        let evaluated_string = self.evaluate_fstring_codegen(fstring)?;
                         Ok(evaluated_string)
                     }
                     LiteralValue::Boolean(value) => {
@@ -502,146 +502,527 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-
-    fn evaluate_fstring_codegen(&mut self, fstring: &str) -> Result<BasicValueEnum<'ctx>, String> {
-        // Parse f-string and evaluate expressions
-        let mut literal_parts = Vec::new();
-        let mut expressions = Vec::new();
-        let mut current_part = String::new();
-        let mut in_expression = false;
-        let chars = fstring.chars().peekable();
-
-        for ch in chars {
-            if in_expression {
-                if ch == '}' {
-                    // End of expression
-                    expressions.push(current_part.clone());
-                    current_part.clear();
-                    in_expression = false;
-                } else {
-                    current_part.push(ch);
-                }
-            } else if ch == '{' {
-                // Start of expression
-                if !current_part.is_empty() {
-                    literal_parts.push(current_part.clone());
-                    current_part.clear();
-                }
-                in_expression = true;
-            } else {
-                current_part.push(ch);
-            }
-        }
-
-        // Add the final literal part if it exists
-        if !current_part.is_empty() {
-            literal_parts.push(current_part.clone());
-        }
-
+    fn evaluate_fstring_codegen(
+        &mut self,
+        fstring: &crate::ast::FString,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         // If there are no expressions, just return the string as is
-        if expressions.is_empty() {
+        if fstring.parts.is_empty() {
             let name = format!("str_{}", self.string_counter);
             self.string_counter += 1;
-            let str_ptr = self
-                .builder
-                .build_global_string_ptr(fstring, &name)
-                .unwrap();
+            let str_ptr = self.builder.build_global_string_ptr("", &name).unwrap();
             return Ok(str_ptr.as_pointer_value().into());
         }
 
-        // Create a vector to hold all parts (literals and evaluated expressions)
-        let mut all_parts = Vec::new();
+        // For f-strings, we need to build a proper string instead of printing directly
+        // Create a format string that will be used with sprintf to build the result
+        let mut format_string = String::new();
+        let mut sprintf_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
 
-        // Process literals and expressions alternately
-        let max_parts = literal_parts.len().max(expressions.len());
-        for i in 0..max_parts {
-            // Add literal part if it exists
-            if i < literal_parts.len() {
-                let name = format!("lit_{}", self.string_counter);
-                self.string_counter += 1;
-                let str_ptr = self
-                    .builder
-                    .build_global_string_ptr(&literal_parts[i], &name)
-                    .unwrap();
-                all_parts.push(str_ptr.as_pointer_value().into());
-            }
-
-            // Add expression result if it exists
-            if i < expressions.len() {
-                let expr_value = self.evaluate_fstring_expression(&expressions[i])?;
-                all_parts.push(expr_value);
+        // Process each part to build format string and arguments
+        for part in &fstring.parts {
+            match part {
+                crate::ast::FStringPart::Literal(literal) => {
+                    // Add literal text directly to format string
+                    format_string.push_str(&literal.replace("%", "%%")); // Escape % characters
+                }
+                crate::ast::FStringPart::Expression(expr) => {
+                    // Evaluate the expression and add appropriate format specifier
+                    let expr_value = self.evaluate_fstring_expression(expr)?;
+                    match expr_value {
+                        BasicValueEnum::IntValue(int_val) => {
+                            format_string.push_str("%ld");
+                            sprintf_args.push(int_val.into());
+                        }
+                        BasicValueEnum::FloatValue(float_val) => {
+                            format_string.push_str("%f");
+                            sprintf_args.push(float_val.into());
+                        }
+                        BasicValueEnum::PointerValue(ptr_val) => {
+                            format_string.push_str("%s");
+                            sprintf_args.push(ptr_val.into());
+                        }
+                        _ => {
+                            format_string.push_str("%s");
+                            let name = format!("unknown_{}", self.string_counter);
+                            self.string_counter += 1;
+                            let str_ptr = self.builder.build_global_string_ptr("?", &name).unwrap();
+                            sprintf_args.push(str_ptr.as_pointer_value().into());
+                        }
+                    }
+                }
             }
         }
 
-        // Concatenate all parts
-        if all_parts.is_empty() {
+        // Allocate buffer for the result string on stack
+        let result_size = format_string.len() + 256; // Extra space for formatted values
+        let i8_type = self.context.i8_type();
+        let result_type = i8_type.array_type(result_size as u32);
+        let result_alloc = self
+            .builder
+            .build_alloca(result_type, "fstring_result")
+            .unwrap();
+        let result_ptr = self
+            .builder
+            .build_pointer_cast(
+                result_alloc,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "result_ptr",
+            )
+            .unwrap();
+
+        // Initialize the buffer to zero to prevent garbage data
+        let zero = i8_type.const_int(0, false);
+        let memset_fn = if let Some(func) = self.module.get_function("memset") {
+            func
+        } else {
+            let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let memset_fn_type = self.context.i64_type().fn_type(
+                &[
+                    i8_ptr_type.into(),
+                    i8_type.into(),
+                    self.context.i64_type().into(),
+                ],
+                false,
+            );
+            self.module.add_function("memset", memset_fn_type, None)
+        };
+
+        let size_val = self.context.i64_type().const_int(result_size as u64, false);
+        let _ = self
+            .builder
+            .build_call(
+                memset_fn,
+                &[result_ptr.into(), zero.into(), size_val.into()],
+                "memset_call",
+            )
+            .unwrap();
+
+        // Get or declare snprintf function for safe string formatting
+        let snprintf_fn = if let Some(func) = self.module.get_function("snprintf") {
+            func
+        } else {
+            let i32_type = self.context.i32_type();
+            let str_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let snprintf_fn_type =
+                i32_type.fn_type(&[str_type.into(), i32_type.into(), str_type.into()], true);
+            self.module.add_function("snprintf", snprintf_fn_type, None)
+        };
+
+        // Create format string global
+        let format_name = format!("fmt_{}", self.string_counter);
+        self.string_counter += 1;
+        let format_ptr = self
+            .builder
+            .build_global_string_ptr(&format_string, &format_name)
+            .unwrap();
+
+        // Build snprintf call with buffer size limit
+        let buffer_size = self
+            .context
+            .i32_type()
+            .const_int((result_size - 1) as u64, false); // Leave space for null terminator
+        let mut all_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = vec![
+            result_ptr.into(),
+            buffer_size.into(),
+            format_ptr.as_pointer_value().into(),
+        ];
+        all_args.extend(sprintf_args);
+
+        let _ = self
+            .builder
+            .build_call(snprintf_fn, &all_args, "snprintf_call")
+            .unwrap();
+
+        // Return the result pointer
+        Ok(result_ptr.into())
+    }
+
+    #[allow(dead_code)]
+    fn concatenate_string_parts(
+        &mut self,
+        parts: &[BasicValueEnum<'ctx>],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        // For f-strings, we need to build a format string and use printf to output the result
+        // This is a simplified approach that prints directly instead of returning a string
+
+        if parts.is_empty() {
             let name = format!("empty_{}", self.string_counter);
             self.string_counter += 1;
             let str_ptr = self.builder.build_global_string_ptr("", &name).unwrap();
             Ok(str_ptr.as_pointer_value().into())
+        } else if parts.len() == 1 {
+            Ok(parts[0])
         } else {
-            // For now, just return the first part to see what it contains
-            Ok(all_parts[0])
+            // Build a format string and use printf to output all parts
+            self.build_printf_concatenation(parts)
         }
+    }
+
+    #[allow(dead_code)]
+    fn build_printf_concatenation(
+        &mut self,
+        parts: &[BasicValueEnum<'ctx>],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        // Get or declare printf function
+        let printf_fn = if let Some(func) = self.module.get_function("printf") {
+            func
+        } else {
+            let i32_type = self.context.i32_type();
+            let str_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let printf_fn_type = i32_type.fn_type(&[str_type.into()], true);
+            self.module.add_function("printf", printf_fn_type, None)
+        };
+
+        // Build format string and arguments
+        let mut format_string = String::new();
+        let mut printf_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
+
+        for part in parts {
+            match part {
+                BasicValueEnum::PointerValue(ptr_val) => {
+                    // Assume this is a string pointer
+                    format_string.push_str("%s");
+                    printf_args.push((*ptr_val).into());
+                }
+                BasicValueEnum::IntValue(int_val) => {
+                    format_string.push_str("%ld");
+                    printf_args.push((*int_val).into());
+                }
+                BasicValueEnum::FloatValue(float_val) => {
+                    format_string.push_str("%f");
+                    printf_args.push((*float_val).into());
+                }
+                _ => {
+                    format_string.push_str("%s");
+                    let name = format!("unknown_{}", self.string_counter);
+                    self.string_counter += 1;
+                    let str_ptr = self.builder.build_global_string_ptr("?", &name).unwrap();
+                    printf_args.push(str_ptr.as_pointer_value().into());
+                }
+            }
+        }
+
+        // Add newline to the format string
+        format_string.push('\n');
+
+        // Create the format string global
+        let format_name = format!("fmt_{}", self.string_counter);
+        self.string_counter += 1;
+        let format_ptr = self
+            .builder
+            .build_global_string_ptr(&format_string, &format_name)
+            .unwrap();
+
+        // Build printf call with format string as first argument
+        let mut all_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+            vec![format_ptr.as_pointer_value().into()];
+        all_args.extend(printf_args);
+
+        // Call printf to output the concatenated string
+        let _ = self
+            .builder
+            .build_call(printf_fn, &all_args, "printf_concat")
+            .unwrap();
+
+        // Return an empty string as the result (since we already printed it)
+        let name = format!("empty_{}", self.string_counter);
+        self.string_counter += 1;
+        let str_ptr = self.builder.build_global_string_ptr("", &name).unwrap();
+        Ok(str_ptr.as_pointer_value().into())
+    }
+
+    #[allow(dead_code)]
+    fn extract_string_from_global(&self, _global_name: &str) -> Option<String> {
+        // This is a simplified version - in a full implementation we'd
+        // need to look up the global variable and extract its string value
+        // For now, we'll return None to indicate we can't extract it
+        None
     }
 
     fn evaluate_fstring_expression(&mut self, expr: &str) -> Result<BasicValueEnum<'ctx>, String> {
-        // For now, we'll handle simple variable names
-        // A full implementation would parse and evaluate complex expressions
+        // Try to parse and evaluate the expression using the existing parser
         let expr = expr.trim();
-        if let Some((_, value)) = self.variables.get(expr) {
-            // Return the value of the variable as a string representation
-            match value {
-                BasicValueEnum::IntValue(int_val) => {
-                    // Convert integer to string
-                    let name = format!("int_str_{}", self.string_counter);
-                    self.string_counter += 1;
-                    if let Some(val) = int_val.get_zero_extended_constant() {
-                        let str_val = val.to_string();
-                        let str_ptr = self
-                            .builder
-                            .build_global_string_ptr(&str_val, &name)
-                            .unwrap();
-                        Ok(str_ptr.as_pointer_value().into())
-                    } else {
-                        let str_ptr = self.builder.build_global_string_ptr("0", &name).unwrap();
-                        Ok(str_ptr.as_pointer_value().into())
-                    }
-                }
-                BasicValueEnum::FloatValue(float_val) => {
-                    // Convert float to string
-                    let name = format!("float_str_{}", self.string_counter);
-                    self.string_counter += 1;
-                    // This is a simplification - in a real implementation we'd need proper float formatting
-                    let (float_val, _) = float_val.get_constant().unwrap_or((0.0, false));
-                    let str_val = format!("{float_val:.6}");
-                    let str_ptr = self
-                        .builder
-                        .build_global_string_ptr(&str_val, &name)
-                        .unwrap();
-                    Ok(str_ptr.as_pointer_value().into())
-                }
-                BasicValueEnum::PointerValue(ptr_val) => {
-                    // Assume this is already a string pointer
-                    Ok(BasicValueEnum::PointerValue(*ptr_val))
-                }
-                _ => {
-                    let name = format!("unknown_{}", self.string_counter);
-                    self.string_counter += 1;
-                    let str_ptr = self
-                        .builder
-                        .build_global_string_ptr("unknown", &name)
-                        .unwrap();
-                    Ok(str_ptr.as_pointer_value().into())
-                }
+
+        // First, try to handle simple variable names
+        if let Some((ptr, value)) = self.variables.get(expr) {
+            // Load the current value from the variable's memory location
+            let loaded_value = self
+                .builder
+                .build_load(value.get_type(), *ptr, &format!("load_{}", expr))
+                .unwrap();
+            return self.value_to_string(loaded_value);
+        }
+
+        // Try to parse as a more complex expression
+        // For now, we'll handle simple arithmetic expressions
+        if let Some(parsed_expr) = self.parse_simple_expression(expr)
+            && let Ok(value) = self.compile_expression(&parsed_expr)
+        {
+            return self.value_to_string(value);
+        }
+
+        // If all else fails, return the expression as a string literal
+        let name = format!("expr_{}", self.string_counter);
+        self.string_counter += 1;
+        let str_ptr = self.builder.build_global_string_ptr(expr, &name).unwrap();
+        Ok(str_ptr.as_pointer_value().into())
+    }
+
+    fn value_to_string(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match value {
+            BasicValueEnum::IntValue(int_val) => {
+                // For runtime integer values, we need to convert them to strings using snprintf
+                let name = format!("int_str_{}", self.string_counter);
+                self.string_counter += 1;
+
+                // Allocate buffer for the string representation
+                let i8_type = self.context.i8_type();
+                let buffer_type = i8_type.array_type(32); // Enough space for 64-bit integer
+                let buffer_alloc = self.builder.build_alloca(buffer_type, &name).unwrap();
+                let buffer_ptr = self
+                    .builder
+                    .build_pointer_cast(
+                        buffer_alloc,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "buffer_ptr",
+                    )
+                    .unwrap();
+
+                // Initialize buffer to zero
+                let zero = i8_type.const_int(0, false);
+                let memset_fn = if let Some(func) = self.module.get_function("memset") {
+                    func
+                } else {
+                    let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let memset_fn_type = self.context.i64_type().fn_type(
+                        &[
+                            i8_ptr_type.into(),
+                            i8_type.into(),
+                            self.context.i64_type().into(),
+                        ],
+                        false,
+                    );
+                    self.module.add_function("memset", memset_fn_type, None)
+                };
+
+                let size_val = self.context.i64_type().const_int(32, false);
+                let _ = self
+                    .builder
+                    .build_call(
+                        memset_fn,
+                        &[buffer_ptr.into(), zero.into(), size_val.into()],
+                        "memset_int",
+                    )
+                    .unwrap();
+
+                // Get or declare snprintf function
+                let snprintf_fn = if let Some(func) = self.module.get_function("snprintf") {
+                    func
+                } else {
+                    let i32_type = self.context.i32_type();
+                    let str_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let snprintf_fn_type = i32_type
+                        .fn_type(&[str_type.into(), i32_type.into(), str_type.into()], true);
+                    self.module.add_function("snprintf", snprintf_fn_type, None)
+                };
+
+                // Create format string for integer
+                let format_name = format!("int_fmt_{}", self.string_counter);
+                self.string_counter += 1;
+                let format_ptr = self
+                    .builder
+                    .build_global_string_ptr("%ld", &format_name)
+                    .unwrap();
+
+                // Call snprintf to convert integer to string
+                let buffer_size = self.context.i32_type().const_int(32, false);
+                let _ = self
+                    .builder
+                    .build_call(
+                        snprintf_fn,
+                        &[
+                            buffer_ptr.into(),
+                            buffer_size.into(),
+                            format_ptr.as_pointer_value().into(),
+                            int_val.into(),
+                        ],
+                        "snprintf_call",
+                    )
+                    .unwrap();
+
+                Ok(buffer_ptr.into())
             }
-        } else {
-            // If not found as a variable, return the expression as a string
-            let name = format!("expr_{}", self.string_counter);
-            self.string_counter += 1;
-            let str_ptr = self.builder.build_global_string_ptr(expr, &name).unwrap();
-            Ok(str_ptr.as_pointer_value().into())
+            BasicValueEnum::FloatValue(float_val) => {
+                // For runtime float values, we need to convert them to strings using snprintf
+                let name = format!("float_str_{}", self.string_counter);
+                self.string_counter += 1;
+
+                // Allocate buffer for the string representation
+                let i8_type = self.context.i8_type();
+                let buffer_type = i8_type.array_type(64); // Enough space for float
+                let buffer_alloc = self.builder.build_alloca(buffer_type, &name).unwrap();
+                let buffer_ptr = self
+                    .builder
+                    .build_pointer_cast(
+                        buffer_alloc,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "buffer_ptr",
+                    )
+                    .unwrap();
+
+                // Initialize buffer to zero
+                let zero = i8_type.const_int(0, false);
+                let memset_fn = if let Some(func) = self.module.get_function("memset") {
+                    func
+                } else {
+                    let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let memset_fn_type = self.context.i64_type().fn_type(
+                        &[
+                            i8_ptr_type.into(),
+                            i8_type.into(),
+                            self.context.i64_type().into(),
+                        ],
+                        false,
+                    );
+                    self.module.add_function("memset", memset_fn_type, None)
+                };
+
+                let size_val = self.context.i64_type().const_int(64, false);
+                let _ = self
+                    .builder
+                    .build_call(
+                        memset_fn,
+                        &[buffer_ptr.into(), zero.into(), size_val.into()],
+                        "memset_float",
+                    )
+                    .unwrap();
+
+                // Get or declare snprintf function
+                let snprintf_fn = if let Some(func) = self.module.get_function("snprintf") {
+                    func
+                } else {
+                    let i32_type = self.context.i32_type();
+                    let str_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let snprintf_fn_type = i32_type
+                        .fn_type(&[str_type.into(), i32_type.into(), str_type.into()], true);
+                    self.module.add_function("snprintf", snprintf_fn_type, None)
+                };
+
+                // Create format string for float
+                let format_name = format!("float_fmt_{}", self.string_counter);
+                self.string_counter += 1;
+                let format_ptr = self
+                    .builder
+                    .build_global_string_ptr("%.6f", &format_name)
+                    .unwrap();
+
+                // Call snprintf to convert float to string
+                let buffer_size = self.context.i32_type().const_int(64, false);
+                let _ = self
+                    .builder
+                    .build_call(
+                        snprintf_fn,
+                        &[
+                            buffer_ptr.into(),
+                            buffer_size.into(),
+                            format_ptr.as_pointer_value().into(),
+                            float_val.into(),
+                        ],
+                        "snprintf_call",
+                    )
+                    .unwrap();
+
+                Ok(buffer_ptr.into())
+            }
+            BasicValueEnum::PointerValue(ptr_val) => {
+                // Assume this is already a string pointer
+                Ok(BasicValueEnum::PointerValue(ptr_val))
+            }
+            _ => {
+                let name = format!("unknown_{}", self.string_counter);
+                self.string_counter += 1;
+                let str_ptr = self
+                    .builder
+                    .build_global_string_ptr("unknown", &name)
+                    .unwrap();
+                Ok(str_ptr.as_pointer_value().into())
+            }
         }
     }
 
+    fn parse_simple_expression(&self, expr: &str) -> Option<Node> {
+        // Very simple expression parser for basic arithmetic
+        // This is a simplified version - a full implementation would use the actual parser
+
+        // Try to parse as integer
+        if let Ok(int_val) = expr.parse::<i64>() {
+            return Some(Node::Literal(Literal {
+                value: LiteralValue::Integer(int_val),
+            }));
+        }
+
+        // Try to parse as float
+        if let Ok(float_val) = expr.parse::<f64>() {
+            return Some(Node::Literal(Literal {
+                value: LiteralValue::Float(float_val),
+            }));
+        }
+
+        // Try to parse as simple binary expression (e.g., "a + b")
+        if let Some((left_str, op_str, right_str)) = self.parse_binary_expression(expr)
+            && let Some(left_node) = self.parse_simple_expression(left_str.trim())
+            && let Some(right_node) = self.parse_simple_expression(right_str.trim())
+        {
+            let operator = match op_str.trim() {
+                "+" => Some(BinaryOperator::Add),
+                "-" => Some(BinaryOperator::Subtract),
+                "*" => Some(BinaryOperator::Multiply),
+                "/" => Some(BinaryOperator::Divide),
+                "//" => Some(BinaryOperator::FloorDivide),
+                "%" => Some(BinaryOperator::Modulo),
+                "**" => Some(BinaryOperator::Power),
+                _ => None,
+            };
+
+            if let Some(op) = operator {
+                return Some(Node::Binary(Binary {
+                    left: Box::new(left_node),
+                    operator: op,
+                    right: Box::new(right_node),
+                }));
+            }
+        }
+
+        // Try to parse as identifier
+        if expr.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Some(Node::Identifier(Identifier {
+                name: expr.to_string(),
+            }));
+        }
+
+        None
+    }
+
+    fn parse_binary_expression(&self, expr: &str) -> Option<(String, String, String)> {
+        // Simple binary expression parser
+        // Look for common operators
+        let operators = ["**", "//", "+", "-", "*", "/", "%"];
+
+        for op in &operators {
+            if let Some(pos) = expr.find(op)
+                && pos > 0
+                && pos + op.len() < expr.len()
+            {
+                let left = expr[..pos].to_string();
+                let right = expr[pos + op.len()..].to_string();
+                return Some((left, op.to_string(), right));
+            }
+        }
+
+        None
+    }
 }

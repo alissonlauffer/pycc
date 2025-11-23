@@ -29,7 +29,7 @@ fn test_parse_integer_literal() {
 
 #[test]
 fn test_parse_float_literal() {
-    let input = "3.14;";
+    let input = "1.23456789012345;";
     let lexer = Lexer::new(input);
     let mut parser = Parser::new(lexer);
     let program = parser.parse_program();
@@ -40,7 +40,7 @@ fn test_parse_float_literal() {
             match &prog.statements[0] {
                 Node::ExpressionStatement(expr_stmt) => match &*expr_stmt.expression {
                     Node::Literal(literal) => match &literal.value {
-                        LiteralValue::Float(value) => assert_eq!(*value, 3.14),
+                        LiteralValue::Float(value) => assert_eq!(*value, 1.23456789012345),
                         _ => panic!("Expected float literal"),
                     },
                     _ => panic!("Expected literal expression"),

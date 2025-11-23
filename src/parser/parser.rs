@@ -95,12 +95,13 @@ impl Parser {
         self.next_token(); // consume 'return'
 
         // Check if there's a return value
-        if self.current_token != Token::Eof && self.current_token != Token::Semicolon {
-            if let Some(value) = self.parse_expression() {
-                return Some(Node::Return(crate::ast::Return {
-                    value: Some(Box::new(value)),
-                }));
-            }
+        if self.current_token != Token::Eof
+            && self.current_token != Token::Semicolon
+            && let Some(value) = self.parse_expression()
+        {
+            return Some(Node::Return(crate::ast::Return {
+                value: Some(Box::new(value)),
+            }));
         }
 
         Some(Node::Return(crate::ast::Return { value: None }))
@@ -294,7 +295,7 @@ impl Parser {
             }
             Token::FString(value) => {
                 let node = Node::Literal(Literal {
-                    value: LiteralValue::FString(value.clone()),
+                    value: LiteralValue::FString(crate::ast::FString::parse(value)),
                 });
                 self.next_token();
                 Some(node)

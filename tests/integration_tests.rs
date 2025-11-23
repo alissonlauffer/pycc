@@ -361,7 +361,6 @@ fn test_arithmetic_operators_python_file() {
     assert!(_result.is_ok(), "Failed to compile {file_path}");
 }
 
-
 #[test]
 fn test_comments_python_file() {
     let file_path = "tests/python_files/comments.py";
