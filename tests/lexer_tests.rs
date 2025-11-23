@@ -49,7 +49,7 @@ fn test_multi_character_tokens() {
 
 #[test]
 fn test_identifiers_and_keywords() {
-    let input = "def if else while return true false None and or not x y123 _test";
+    let input = "def if else while return True False None and or not x y123 _test";
     let mut lexer = Lexer::new(input);
 
     let expected_tokens = vec![

@@ -1,6 +1,6 @@
 # PyCC - Python Compiled Compiler
 
-PyCC is a Python interpreter and compiler that generates LLVM IR and compiles to native code.
+PyCC is a Python compiler that generates LLVM IR and compiles to native code.
 
 ## Features
 - Python-like syntax for ease of use

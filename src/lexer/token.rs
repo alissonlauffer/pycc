@@ -20,8 +20,9 @@ pub enum Token {
     Else,
     While,
     Return,
-    True,
-    False,
+    // True, False are handled as Boolean literals instead
+    // True,
+    // False,
 
     // Operators
     Plus,         // +
@@ -47,8 +48,8 @@ pub enum Token {
     RightParen,   // )
     LeftBrace,    // {
     RightBrace,   // }
-    LeftBracket,  // [
-    RightBracket, // ]
+    // LeftBracket,  // [ - Not currently used
+    // RightBracket, // ] - Not currently used
     Comma,        // ,
     Colon,        // :
     Semicolon,    // ;
@@ -58,18 +59,3 @@ pub enum Token {
     Illegal(String),
 }
 
-impl Token {
-    pub fn literal(&self) -> String {
-        match self {
-            Token::Integer(value) => value.to_string(),
-            Token::Float(value) => value.to_string(),
-            Token::String(value) => value.clone(),
-            Token::FString(value) => value.clone(),
-            Token::Boolean(value) => value.to_string(),
-            Token::Identifier(value) => value.clone(),
-            Token::Illegal(value) => value.clone(),
-            Token::Comment(value) => value.clone(),
-            _ => format!("{self:?}"),
-        }
-    }
-}

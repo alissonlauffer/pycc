@@ -6,7 +6,9 @@ pub enum Node {
     // Statement nodes
     Function(Function),
     Assignment(Assignment),
+    #[allow(dead_code)]
     If(If),
+    #[allow(dead_code)]
     While(While),
     Return(Return),
     ExpressionStatement(Expression),
@@ -69,13 +71,21 @@ pub enum BinaryOperator {
     FloorDivide,
     Modulo,
     Power,
+    #[allow(dead_code)]
     Equal,
+    #[allow(dead_code)]
     NotEqual,
+    #[allow(dead_code)]
     Less,
+    #[allow(dead_code)]
     Greater,
+    #[allow(dead_code)]
     LessEqual,
+    #[allow(dead_code)]
     GreaterEqual,
+    #[allow(dead_code)]
     And,
+    #[allow(dead_code)]
     Or,
 }
 
@@ -89,6 +99,7 @@ pub struct Unary {
 pub enum UnaryOperator {
     Plus,
     Minus,
+    #[allow(dead_code)]
     Not,
 }
 

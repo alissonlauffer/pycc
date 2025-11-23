@@ -1,14 +1,12 @@
 mod ast;
 mod cli;
 mod codegen;
-mod interpreter;
 mod lexer;
 mod parser;
 
 use clap::Parser as ClapParser;
 use cli::{Cli, Commands};
 use codegen::CodeGenerator;
-use interpreter::Interpreter;
 use lexer::Lexer;
 use parser::Parser as PyParser;
 use std::fs;
@@ -19,37 +17,11 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { input_file } => {
-            let input = match fs::read_to_string(&input_file) {
-                Ok(content) => content,
-                Err(e) => {
-                    eprintln!("Error reading file {input_file:?}: {e}");
-                    process::exit(1);
-                }
-            };
-
-            let lexer = Lexer::new(&input);
-            let mut py_parser = PyParser::new(lexer);
-            let ast = py_parser.parse_program();
-
-            // Interpret the AST
-            let mut interpreter = Interpreter::new();
-            match interpreter.interpret(&ast) {
-                Ok(_) => {
-                    // Print the interpreter's output
-                    let output = interpreter.get_output();
-                    if !output.is_empty() {
-                        println!("{output}");
-                    }
-                }
-                Err(e) => println!("Error: {e}"),
-            }
-        }
         Commands::Compile {
             input_file,
             output,
             emit_llvm,
-            optimization,
+            optimization: _,
         } => {
             let input = match fs::read_to_string(&input_file) {
                 Ok(content) => content,

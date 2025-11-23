@@ -19,17 +19,17 @@ fn test_literal_nodes() {
     });
 
     // Test string literal
-    let string_literal = Node::Literal(Literal {
+    let _string_literal = Node::Literal(Literal {
         value: LiteralValue::String("hello".to_string()),
     });
 
     // Test boolean literal
-    let bool_literal = Node::Literal(Literal {
+    let _bool_literal = Node::Literal(Literal {
         value: LiteralValue::Boolean(true),
     });
 
     // Test None literal
-    let none_literal = Node::Literal(Literal {
+    let _none_literal = Node::Literal(Literal {
         value: LiteralValue::None,
     });
 
@@ -66,19 +66,19 @@ fn test_binary_operations() {
         right: right.clone(),
     });
 
-    let sub_expr = Node::Binary(Binary {
+    let _sub_expr = Node::Binary(Binary {
         left: left.clone(),
         operator: BinaryOperator::Subtract,
         right: right.clone(),
     });
 
-    let mul_expr = Node::Binary(Binary {
+    let _mul_expr = Node::Binary(Binary {
         left: left.clone(),
         operator: BinaryOperator::Multiply,
         right: right.clone(),
     });
 
-    let div_expr = Node::Binary(Binary {
+    let _div_expr = Node::Binary(Binary {
         left: left.clone(),
         operator: BinaryOperator::Divide,
         right: right.clone(),

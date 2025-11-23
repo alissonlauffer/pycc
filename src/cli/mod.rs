@@ -11,13 +11,6 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Run a Python file directly
-    Run {
-        /// Input file to run
-        #[arg(value_name = "FILE")]
-        input_file: PathBuf,
-    },
-
     /// Compile a Python file to LLVM IR or executable
     Compile {
         /// Input file to compile

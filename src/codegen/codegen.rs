@@ -307,10 +307,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                         _ => Err("Unsupported operation".to_string()),
                     },
                     BinaryOperator::Power => match (left, right) {
-                        (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
+                        (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(_r)) => {
                             Ok(BasicValueEnum::IntValue(l))
                         }
-                        (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => {
+                        (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(_r)) => {
                             Ok(BasicValueEnum::FloatValue(l))
                         }
                         _ => Err("Unsupported operation".to_string()),
@@ -335,7 +335,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .unwrap();
                     // For now, we'll assume the function returns a value
                     // In a real implementation, we'd need to handle void returns
-                    Ok(call_result.try_as_basic_value().left().unwrap())
+                    Ok(call_result.try_as_basic_value().unwrap_basic())
                 } else if call.callee == "print" {
                     // Special handling for print function
                     // Get or declare printf function
@@ -502,45 +502,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    pub fn get_target_machine(
-        &self,
-        optimization: u8,
-    ) -> Result<inkwell::targets::TargetMachine, String> {
-        use inkwell::OptimizationLevel;
-        use inkwell::targets::{InitializationConfig, Target, TargetMachine};
-
-        // Initialize LLVM targets
-        let config = InitializationConfig::default();
-        Target::initialize_all(&config);
-
-        // Get the target triple for the current machine
-        let target_triple = TargetMachine::get_default_triple();
-        let target = Target::from_triple(&target_triple)
-            .map_err(|e| format!("Failed to get target: {}", e.to_string()))?;
-
-        // Set optimization level
-        let opt_level = match optimization {
-            0 => OptimizationLevel::None,
-            1 => OptimizationLevel::Less,
-            2 => OptimizationLevel::Default,
-            3 => OptimizationLevel::Aggressive,
-            _ => OptimizationLevel::Default,
-        };
-
-        // Create target machine
-        let target_machine = target
-            .create_target_machine(
-                &target_triple,
-                "generic",
-                "",
-                opt_level,
-                inkwell::targets::RelocMode::Default,
-                inkwell::targets::CodeModel::Default,
-            )
-            .ok_or("Failed to create target machine")?;
-
-        Ok(target_machine)
-    }
 
     fn evaluate_fstring_codegen(&mut self, fstring: &str) -> Result<BasicValueEnum<'ctx>, String> {
         // Parse f-string and evaluate expressions
@@ -683,24 +644,4 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    fn concatenate_strings(
-        &mut self,
-        parts: &[BasicValueEnum<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
-        if parts.is_empty() {
-            let name = format!("empty_{}", self.string_counter);
-            self.string_counter += 1;
-            let str_ptr = self.builder.build_global_string_ptr("", &name).unwrap();
-            return Ok(str_ptr.as_pointer_value().into());
-        }
-
-        if parts.len() == 1 {
-            return Ok(parts[0]);
-        }
-
-        // For now, we'll create a simple concatenated string representation
-        // In a full implementation, we would use LLVM's string concatenation functions
-        // For now, we'll just return the first part as a placeholder
-        Ok(parts[0])
-    }
 }
